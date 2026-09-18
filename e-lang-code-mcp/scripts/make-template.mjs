@@ -73,7 +73,7 @@ try {
   console.log(`  (停止失败: ${error.message})`);
 }
 await sleep(1000);
-await call("project.open", { path: source, saveCurrent: false });
+await call("project.open", { path: source, saveCurrent: true });
 await sleep(1500);
 
 // ---- 1) 删掉 EUI_启动界面 里自递归的 EUI_启动界面 () ----
