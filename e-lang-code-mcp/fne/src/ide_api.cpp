@@ -577,18 +577,19 @@ struct CommandInfo {
 
 std::string ArgTypeName(DATA_TYPE rawType) {
     const DATA_TYPE type = static_cast<DATA_TYPE>(rawType & ~0x20000000u);  // 清除 DT_IS_ARY
-    if (type == SDT_BYTE) return "字节型";
-    if (type == SDT_SHORT) return "短整数型";
-    if (type == SDT_INT) return "整数型";
-    if (type == SDT_INT64) return "长整数型";
-    if (type == SDT_FLOAT) return "小数型";
-    if (type == SDT_DOUBLE) return "双精度小数型";
-    if (type == SDT_BOOL) return "逻辑型";
-    if (type == SDT_DATE_TIME) return "日期时间型";
-    if (type == SDT_TEXT) return "文本型";
-    if (type == SDT_BIN) return "字节集";
-    if (type == SDT_SUB_PTR) return "子程序指针";
-    return "其它";
+    // 注意：C++ 窄字面量是 GBK，必须转成 UTF-8 再进 JSON。
+    if (type == SDT_BYTE) return AnsiToUtf8("字节型");
+    if (type == SDT_SHORT) return AnsiToUtf8("短整数型");
+    if (type == SDT_INT) return AnsiToUtf8("整数型");
+    if (type == SDT_INT64) return AnsiToUtf8("长整数型");
+    if (type == SDT_FLOAT) return AnsiToUtf8("小数型");
+    if (type == SDT_DOUBLE) return AnsiToUtf8("双精度小数型");
+    if (type == SDT_BOOL) return AnsiToUtf8("逻辑型");
+    if (type == SDT_DATE_TIME) return AnsiToUtf8("日期时间型");
+    if (type == SDT_TEXT) return AnsiToUtf8("文本型");
+    if (type == SDT_BIN) return AnsiToUtf8("字节集");
+    if (type == SDT_SUB_PTR) return AnsiToUtf8("子程序指针");
+    return AnsiToUtf8("其它");
 }
 
 std::wstring ToAsciiLowerW(std::wstring value) {
