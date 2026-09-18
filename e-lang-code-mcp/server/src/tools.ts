@@ -597,11 +597,43 @@ export function registerTools(server: McpServer, client: BridgeClient): void {
   );
 
   server.registerTool(
+    "lib_find_command",
+    {
+      title: "★ 先搜这个：查找现成命令（支持库 + 易模块）",
+      description:
+        "【写任何功能代码之前先调用本工具】一次同时搜索已加载的 .fne 支持库与已导入的 .ec 易模块，返回可直接抄写的命令签名（命令名 + 参数名 + 参数类型 + 所属库）。规则：先搜到现成命令就用它；只有确实搜不到，才自己写实现。",
+      inputSchema: {
+        keyword: z.string().min(1).max(64).describe("关键词，如「文本」「编码」「正则」「JSON」「文件」「加密」"),
+        limit: z.number().int().min(1).max(100).default(30),
+      },
+      annotations: readOnly,
+    },
+    async ({ keyword, limit }) => {
+      const [libraries, ecoms] = await Promise.all([
+        client.call<{ totalMatches?: number; commands?: unknown[] }>("lib.searchCommands", {
+          keyword,
+          limit,
+          includeTree: true,
+        }),
+        client.call<{ totalMatches?: number; commands?: unknown[] }>("lib.searchEcomCommands", { keyword, limit }),
+      ]);
+      return output({
+        keyword,
+        rule: "优先使用下面的现成命令；确实没有合适的再自己写实现。",
+        libraryMatches: libraries.totalMatches ?? 0,
+        ecomMatches: ecoms.totalMatches ?? 0,
+        fromLibraries: libraries.commands ?? [],
+        fromEcomModules: ecoms.commands ?? [],
+      });
+    },
+  );
+
+  server.registerTool(
     "lib_search_commands",
     {
       title: "搜索支持库命令",
       description:
-        "按关键词按需搜索已加载支持库/易模块提供的命令，返回命令名、参数名与参数类型。写代码前需要确认某类命令时再调用，避免一次拉取全部命令浪费上下文。",
+        "按关键词搜索已加载的 .fne 支持库命令（含 IDE 命令树），返回命令名、参数名与参数类型。一般直接用 lib_find_command（它会同时搜 .ec）即可；需要精确限定支持库/命令树时再用本工具。",
       inputSchema: {
         keyword: z.string().default("").describe("关键词，匹配命令名（中/英）；留空则返回前 limit 条"),
         limit: z.number().int().min(1).max(500).default(50),
@@ -636,7 +668,7 @@ export function registerTools(server: McpServer, client: BridgeClient): void {
     {
       title: "搜索易模块(.ec)命令",
       description:
-        "解析易模块 .ec 里的命令与参数（含类型），返回可直接使用的签名（如 `文本_取随机字符 (长度, 类型) -> 文本型`）。默认搜当前工程加载的所有 .ec；写代码需要用到易模块命令时再调用。",
+        "解析并搜索已导入的易模块 .ec 命令（含参数名与类型），返回可直接使用的签名（如 `文本_取随机字符 (长度, 类型) -> 文本型`）。一般直接用 lib_find_command（它会同时搜 .fne）即可。",
       inputSchema: {
         keyword: z.string().default("").describe("关键词，匹配命令名/参数名；留空返回前 limit 条"),
         limit: z.number().int().min(1).max(1000).default(100),

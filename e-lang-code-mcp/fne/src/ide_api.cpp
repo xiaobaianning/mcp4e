@@ -1927,9 +1927,29 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
     // 那会把 EUI_启动界面 () 插进 EUI_启动界面 自己，造成无限递归。
     auto ensureEntryCall = [&](const std::string& callText) -> int {
         const char* candidates[] = { "_启动子程序", "__启动窗口_创建完毕" };
+        const std::string hideText = AnsiToUtf8("_启动窗口.可视 ＝ 假");
+        // 往入口子程序里写调用；窗口程序还要先把自带的 _启动窗口 藏起来，
+        // 而且必须插在调用之前（调用会阻塞在 EUI 的消息循环里）。
+        auto applyEntry = [&](int subRow, const char* candidate) -> int {
+            const int callRow = ensureStatement(subRow, callText, std::string());
+            if (callRow < 0 || std::string(candidate) != "__启动窗口_创建完毕") return callRow;
+            const int endRow = endRowOf(subRow);
+            for (const auto& cell : ReadCurrentCells(kMaxCodeRows)) {
+                if (cell.type == VT_SUB_PRG_ITEM && !cell.title && cell.row > subRow && cell.row < endRow &&
+                    cell.text == hideText) {
+                    return callRow;
+                }
+            }
+            try {
+                insertTryAnchors({callRow}, {FN_INSERT_NEW}, VT_SUB_PRG_ITEM, hideText);
+            } catch (...) {
+                // 藏窗口失败不影响主流程
+            }
+            return callRow;
+        };
         for (const char* candidate : candidates) {
             const int subRow = findRow(VT_SUB_NAME, AnsiToUtf8(candidate));
-            if (subRow >= 0) return ensureStatement(subRow, callText, std::string());
+            if (subRow >= 0) return applyEntry(subRow, candidate);
         }
         const std::wstring originalDocument = WindowTitleOf(ActiveMdiDocument());
         for (const auto& title : ProgramSetTitles()) {
@@ -1937,7 +1957,7 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
             if (!ActivateDocumentByPrefix(title)) continue;
             for (const char* candidate : candidates) {
                 const int subRow = findRow(VT_SUB_NAME, AnsiToUtf8(candidate));
-                if (subRow >= 0) return ensureStatement(subRow, callText, std::string());
+                if (subRow >= 0) return applyEntry(subRow, candidate);
             }
         }
         if (!originalDocument.empty()) ActivateDocumentByPrefix(originalDocument);
