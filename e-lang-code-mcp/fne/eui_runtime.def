@@ -1,0 +1,11 @@
+LIBRARY "eui_runtime.dll"
+EXPORTS
+    EUI_RunA=_EUI_RunA@8
+    EUI_Close=_EUI_Close@0
+    EUI_SetTextA=_EUI_SetTextA@8
+    EUI_GetTextPtrA=_EUI_GetTextPtrA@4
+    EUI_SetVisible=_EUI_SetVisible@8
+    EUI_SetEnabled=_EUI_SetEnabled@8
+    EUI_GetLastEventControl=_EUI_GetLastEventControl@0
+    EUI_GetLastEventCode=_EUI_GetLastEventCode@0
+    EUI_GetLastEventValuePtrA=_EUI_GetLastEventValuePtrA@0

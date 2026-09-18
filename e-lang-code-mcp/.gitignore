@@ -1,0 +1,8 @@
+# 构建产物
+fne/dist/
+fne/obj/
+fne/generated-sdk/*.h
+
+# Node
+server/node_modules/
+server/dist/

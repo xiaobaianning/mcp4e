@@ -1,0 +1,3 @@
+LIBRARY "elang_mcp.fne"
+EXPORTS
+    GetNewInf

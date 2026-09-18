@@ -1,0 +1,29 @@
+{
+  "name": "e-lang-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "易语言 MCP 服务（读写 IDE 中的代码，不碰 .e 二进制）",
+  "bin": {
+    "e-lang-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --legal-comments=external --outfile=dist/server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
