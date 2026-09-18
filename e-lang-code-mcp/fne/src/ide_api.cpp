@@ -1321,8 +1321,107 @@ mj::Value MoveCode(const mj::Value& params) {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// 活动视图：代码表操作只作用于「当前活动文档」。
+// 各文档是 MDIClient 的子窗口（标题形如「程序集: xxx」「Dll命令定义表」「窗口: xxx」），
+// 可以用 WM_MDIACTIVATE 直接切换 —— 官方没有「切到程序集」的功能号，这是唯一的办法。
+// ---------------------------------------------------------------------------
+struct FindWindowContext {
+    const std::wstring* prefix = nullptr;
+    const wchar_t* className = nullptr;
+    HWND found = nullptr;
+};
+
+BOOL CALLBACK FindWindowProc(HWND window, LPARAM parameter) {
+    auto* context = reinterpret_cast<FindWindowContext*>(parameter);
+    if (context->found) return FALSE;
+    wchar_t title[512]{};
+    GetWindowTextW(window, title, 512);
+    const bool titleMatches = context->prefix && !context->prefix->empty() &&
+                              std::wstring(title).rfind(*context->prefix, 0) == 0;
+    bool classMatches = false;
+    if (context->className) {
+        wchar_t name[256]{};
+        GetClassNameW(window, name, 256);
+        classMatches = wcscmp(name, context->className) == 0;
+    }
+    if (titleMatches || classMatches) {
+        context->found = window;
+        return FALSE;
+    }
+    EnumChildWindows(window, FindWindowProc, parameter);
+    return context->found ? FALSE : TRUE;
+}
+
+HWND FindDescendant(const std::wstring* titlePrefix, const wchar_t* className) {
+    HWND mainWindow = g_notify ? reinterpret_cast<HWND>(g_notify(NES_GET_MAIN_HWND, 0, 0)) : nullptr;
+    if (!mainWindow) return nullptr;
+    FindWindowContext context{ titlePrefix, className, nullptr };
+    EnumChildWindows(mainWindow, FindWindowProc, reinterpret_cast<LPARAM>(&context));
+    return context.found;
+}
+
+HWND ActiveMdiDocument() {
+    HWND client = FindDescendant(nullptr, L"MDIClient");
+    if (!client) return nullptr;
+    return reinterpret_cast<HWND>(SendMessageW(client, WM_MDIGETACTIVE, 0, 0));
+}
+
+std::wstring WindowTitleOf(HWND window) {
+    if (!window) return {};
+    wchar_t title[512]{};
+    GetWindowTextW(window, title, 512);
+    return title;
+}
+
+// 列出所有「程序集」标题（用于跨程序集找入口子程序）。
+std::vector<std::wstring> ProgramSetTitles() {
+    std::vector<std::wstring> titles;
+    HWND client = FindDescendant(nullptr, L"MDIClient");
+    if (!client) return titles;
+    EnumChildWindows(client, [](HWND window, LPARAM parameter) -> BOOL {
+        auto* out = reinterpret_cast<std::vector<std::wstring>*>(parameter);
+        const std::wstring title = WindowTitleOf(window);
+        if (title.rfind(L"程序集", 0) == 0) out->push_back(title);
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&titles));
+    return titles;
+}
+
+int ActiveWindowType() {
+    int windowType = 0;
+    RunIdeFunction(FN_GET_ACTIVE_WND_TYPE, reinterpret_cast<DWORD>(&windowType), 0);
+    return windowType;
+}
+
+// 按标题前缀激活 IDE 文档窗口；成功返回 true。
+bool ActivateDocumentByPrefix(const std::wstring& prefix, std::wstring* activatedTitle = nullptr) {
+    HWND mainWindow = g_notify ? reinterpret_cast<HWND>(g_notify(NES_GET_MAIN_HWND, 0, 0)) : nullptr;
+    if (!mainWindow) return false;
+    HWND target = FindDescendant(&prefix, nullptr);
+    if (!target) return false;
+    ShowWindow(target, SW_SHOW);
+    SetWindowPos(target, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SendMessageW(GetParent(target), WM_MDIACTIVATE, reinterpret_cast<WPARAM>(target), 0);
+    SetForegroundWindow(mainWindow);
+    SetFocus(target);
+    PumpIdeMessages();
+    if (activatedTitle) *activatedTitle = WindowTitleOf(target);
+    return true;
+}
+
+// 确保当前活动窗口是「程序集(代码)」。
+bool EnsureCodeView() {
+    if (ActiveWindowType() == 1) return true;
+    ActivateDocumentByPrefix(L"程序集");
+    return ActiveWindowType() == 1;
+}
+
 // 在 DLL 命令表里确保一组 DLL 命令存在（不存在则插入并填充字段与参数）。
 mj::Value SyncDllCommands(const mj::Value& params) {
+    // 记住当前文档，干完活切回去（否则后续代码表操作会全部失效）。
+    const std::wstring previousDocument = WindowTitleOf(ActiveMdiDocument());
+    const bool wasCodeView = ActiveWindowType() == 1;
     const auto& commands = params.at("commands");
     if (!RunIdeFunction(FN_VIEW_DLLCMD_TAB)) throw std::runtime_error("无法打开 DLL 命令表");
     PumpIdeMessages();
@@ -1485,6 +1584,9 @@ mj::Value SyncDllCommands(const mj::Value& params) {
 
     mj::Value result = mj::Value::object();
     result["results"] = std::move(results);
+    if (wasCodeView && !previousDocument.empty()) {
+        ActivateDocumentByPrefix(previousDocument);
+    }
     return result;
 }
 
@@ -1561,39 +1663,22 @@ mj::Value DiagnoseCaret() {
     return result;
 }
 
-// 确保当前活动窗口是「程序集(代码)」。DLL 命令表/数据类型表等会让代码表操作全部失效，
-// 而官方没有“切到程序集”的功能号，只能靠 FN_MOVE_NEXT_UNIT / FN_MOVE_PREV_UNIT 逐个单元找。
-bool EnsureCodeView() {
-    int windowType = 0;
-    RunIdeFunction(FN_GET_ACTIVE_WND_TYPE, reinterpret_cast<DWORD>(&windowType), 0);
-    if (windowType == 1) return true;
-    for (int attempt = 0; attempt < 16; ++attempt) {
-        int current = 0;
-        RunIdeFunction(FN_GET_ACTIVE_WND_TYPE, reinterpret_cast<DWORD>(&current), 0);
-        if (current == 1) return true;
-        if (!RunIdeFunction(FN_MOVE_NEXT_UNIT)) break;
-        PumpIdeMessages();
+// 选中并删除指定行范围（用于清理垃圾 DLL 命令 / 多余语句）。
+// 原理：FN_BLK_ADD_DEF(顶行, 底行) 加块选，再 FN_REMOVE 删掉。
+mj::Value RemoveRowRange(const mj::Value& params) {
+    const int top = params.at("top").asInt();
+    const int bottom = params.contains("bottom") ? params.at("bottom").asInt() : top;
+    if (top < 0 || bottom < top) throw std::runtime_error("行范围无效");
+    if (!RunIdeFunction(FN_BLK_ADD_DEF, static_cast<DWORD>(top), static_cast<DWORD>(bottom))) {
+        throw std::runtime_error("无法选中指定行范围");
     }
-    for (int attempt = 0; attempt < 16; ++attempt) {
-        int current = 0;
-        RunIdeFunction(FN_GET_ACTIVE_WND_TYPE, reinterpret_cast<DWORD>(&current), 0);
-        if (current == 1) return true;
-        if (!RunIdeFunction(FN_MOVE_PREV_UNIT)) break;
-        PumpIdeMessages();
-    }
-    int finalType = 0;
-    RunIdeFunction(FN_GET_ACTIVE_WND_TYPE, reinterpret_cast<DWORD>(&finalType), 0);
-    return finalType == 1;
-}
-
-// 切到「程序集」代码视图，并返回切换后的窗口类型（供脚本/工具恢复视图用）。
-mj::Value EnsureCodeViewResult() {
-    const bool ok = EnsureCodeView();
-    int windowType = 0;
-    RunIdeFunction(FN_GET_ACTIVE_WND_TYPE, reinterpret_cast<DWORD>(&windowType), 0);
+    PumpIdeMessages();
+    if (!RunIdeFunction(FN_REMOVE)) throw std::runtime_error("IDE 拒绝删除所选行");
+    PumpIdeMessages();
     mj::Value result = mj::Value::object();
-    result["ok"] = ok ? 1 : 0;
-    result["activeWindowType"] = windowType;
+    result["removed"] = 1;
+    result["top"] = top;
+    result["bottom"] = bottom;
     return result;
 }
 
@@ -1614,6 +1699,27 @@ mj::Value CallIdeFunction(const mj::Value& params) {
     return result;
 }
 
+// 开发调试：按标题前缀激活 IDE 文档窗口，返回激活后的窗口类型。
+mj::Value ActivateWindowByTitle(const mj::Value& params) {
+    const std::wstring prefix = Utf8ToWide(params.contains("titlePrefix") ? params.at("titlePrefix").asString() : std::string());
+    std::wstring activated;
+    const bool ok = ActivateDocumentByPrefix(prefix, &activated);
+    mj::Value result = mj::Value::object();
+    result["activated"] = ok ? 1 : 0;
+    result["title"] = WideToUtf8(activated);
+    result["activeWindowType"] = ActiveWindowType();
+    return result;
+}
+
+// 切到「程序集」代码视图，并返回切换后的窗口类型。
+mj::Value EnsureCodeViewResult() {
+    const bool ok = EnsureCodeView();
+    mj::Value result = mj::Value::object();
+    result["ok"] = ok ? 1 : 0;
+    result["activeWindowType"] = ActiveWindowType();
+    return result;
+}
+
 // 一键写入界面脚手架：模块 __EUI_生成 / EUI_事件 + 子程序 + 语句 + 参数 + DLL 声明。
 mj::Value SyncUiScaffold(const mj::Value& params) {
     const std::string documentName = params.at("documentName").asString();
@@ -1624,11 +1730,18 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
         if (mainWindow) { SetForegroundWindow(mainWindow); PumpIdeMessages(); }
     }
 
-    // 关键：DLL 命令表等其它表会让代码表操作全部失效，先切回「程序集」。
+    // 关键：DLL 命令表等其它表会让代码表操作全部失效。
+    // 官方没有“切到程序集”的功能号，只能尽量尝试；失败就明确报错，不要静默失败。
     EnsureCodeView();
-
     int activeWindow = 0;
     RunIdeFunction(FN_GET_ACTIVE_WND_TYPE, reinterpret_cast<DWORD>(&activeWindow), 0);
+    if (activeWindow != 1) {
+        std::ostringstream message;
+        message << "当前活动窗口不是「程序集(代码)」而是 " << activeWindow
+                << " (1=程序集 2=数据类型 3=全局变量 4=DLL命令 5=窗体 6=常量 7=图片 8=声音)。"
+                   "易语言没有切换到「程序集」的官方功能号，请在易语言里手动点一下「程序」标签后重试。";
+        throw std::runtime_error(message.str());
+    }
 
     auto findRow = [](int type, const std::string& text) -> int {
         for (const auto& cell : ReadCurrentCells(kMaxCodeRows)) {
@@ -1654,21 +1767,25 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
         for (const auto& cell : ReadCurrentCells(kMaxCodeRows)) maxRow = std::max(maxRow, cell.row);
         return maxRow;
     };
-    // 插入新单元后，光标应落在新单元上、且表格行数增加；满足才写入。
-    auto writeAtCaret = [&setAt, &maxRowNow, &activeWindow](int expectedType, const std::string& text, int beforeMaxRow) -> int {
+    // 插入新单元后，光标应落在新单元上（类型对 + 不是标题），且至少满足其一：
+    //   表格行数增加，或者光标处的文本与插入前不同（新单元会拿到默认名，如「子程序3」）。
+    auto writeAtCaret = [&setAt, &maxRowNow, &activeWindow](int expectedType, const std::string& text,
+                                                             int beforeMaxRow, const std::string& anchorText) -> int {
         const auto caret = CurrentCaret();
         ProgramCell cell;
         const bool readable = caret.first >= 0 && ReadProgramCell(caret.first, 0, &cell);
         const int afterMaxRow = maxRowNow();
         const bool typeOk = readable && cell.type == expectedType && !cell.title;
         const bool grew = afterMaxRow > beforeMaxRow;
-        if (!typeOk || !grew) {
+        const bool changed = readable && cell.text != anchorText;
+        if (!typeOk || (!grew && !changed)) {
             std::ostringstream message;
             message << "插入未成功 (活动窗口=" << activeWindow
                     << ", 期望类型=" << expectedType << ", 光标行=" << caret.first
                     << ", 实际类型=" << (readable ? cell.type : -1)
                     << ", 是标题=" << (readable && cell.title ? 1 : 0)
                     << ", 实际文本=[" << (readable ? Utf8ToAnsi(cell.text) : std::string()) << "]"
+                    << ", 插入前该行文本=[" << Utf8ToAnsi(anchorText) << "]"
                     << ", 插入前行数=" << beforeMaxRow << ", 插入后行数=" << afterMaxRow << ")";
             throw std::runtime_error(message.str());
         }
@@ -1684,11 +1801,13 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
             if (anchor < 0) continue;
             for (DWORD function : functions) {
                 MoveCaretToCell(anchor, 0);
+                ProgramCell anchorCell;
+                const bool hadAnchor = ReadProgramCell(anchor, 0, &anchorCell);
                 const int beforeMaxRow = maxRowNow();
                 if (!RunIdeFunction(function)) { lastError = "IDE 拒绝该插入功能"; continue; }
                 PumpIdeMessages();
                 try {
-                    return writeAtCaret(expectedType, text, beforeMaxRow);
+                    return writeAtCaret(expectedType, text, beforeMaxRow, hadAnchor ? anchorCell.text : std::string());
                 } catch (const std::exception& error) {
                     lastError = error.what();
                 }
@@ -1744,6 +1863,13 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
                 return cell.row;
             }
         }
+        // 优先复用子程序里已有的空白语句行（比插入可靠得多）
+        for (const auto& cell : ReadCurrentCells(kMaxCodeRows)) {
+            if (cell.type == VT_SUB_PRG_ITEM && !cell.title && cell.row > subRow && cell.row < endRow && cell.text.empty()) {
+                setAt(cell.row, cell.column, text);
+                return cell.row;
+            }
+        }
         const int anchor = rowOfTypeIn(VT_SUB_PRG_ITEM, subRow, endRow);
         const int last = lastRowIn(subRow, endRow);
         return insertTryAnchors({anchor, last, subRow}, {FN_INSERT_NEW, FN_INSERT_NEW_AT_NEXT}, VT_SUB_PRG_ITEM, text);
@@ -1760,6 +1886,16 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
             if (cell.type == VT_SUB_ARG_NAME && !cell.title && cell.row > subRow && cell.row < endRow && cell.text == name) {
                 row = cell.row;
                 break;
+            }
+        }
+        if (row < 0) {
+            // 优先复用已有的空白参数行（避免插入）
+            for (const auto& cell : ReadCurrentCells(kMaxCodeRows)) {
+                if (cell.type == VT_SUB_ARG_NAME && !cell.title && cell.row > subRow && cell.row < endRow && cell.text.empty()) {
+                    setAt(cell.row, cell.column, name);
+                    row = cell.row;
+                    break;
+                }
             }
         }
         if (row < 0) {
@@ -1785,16 +1921,27 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
     };
 
     // 在程序入口子程序里调用 EUI_启动界面 ()：优先 _启动子程序，其次 __启动窗口_创建完毕。
+    // 当前程序集里没有就切换到其它「程序集」文档找（普通 Windows 工程的入口在
+    // 「窗口程序集_启动窗口」里，而脚手架代码通常在另一个程序集）。
+    // 找不到入口就返回 -1，**绝不**退化成“插到第一个子程序里”——
+    // 那会把 EUI_启动界面 () 插进 EUI_启动界面 自己，造成无限递归。
     auto ensureEntryCall = [&](const std::string& callText) -> int {
         const char* candidates[] = { "_启动子程序", "__启动窗口_创建完毕" };
-        int subRow = -1;
         for (const char* candidate : candidates) {
-            subRow = findRow(VT_SUB_NAME, AnsiToUtf8(candidate));
-            if (subRow >= 0) break;
+            const int subRow = findRow(VT_SUB_NAME, AnsiToUtf8(candidate));
+            if (subRow >= 0) return ensureStatement(subRow, callText, std::string());
         }
-        if (subRow < 0) subRow = rowOfTypeIn(VT_SUB_NAME, -1, kMaxCodeRows);
-        if (subRow < 0) return -1;
-        return ensureStatement(subRow, callText, std::string());
+        const std::wstring originalDocument = WindowTitleOf(ActiveMdiDocument());
+        for (const auto& title : ProgramSetTitles()) {
+            if (title == originalDocument) continue;
+            if (!ActivateDocumentByPrefix(title)) continue;
+            for (const char* candidate : candidates) {
+                const int subRow = findRow(VT_SUB_NAME, AnsiToUtf8(candidate));
+                if (subRow >= 0) return ensureStatement(subRow, callText, std::string());
+            }
+        }
+        if (!originalDocument.empty()) ActivateDocumentByPrefix(originalDocument);
+        return -1;
     };
 
     const std::string startupName = AnsiToUtf8("EUI_启动界面");
@@ -1827,18 +1974,16 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
         codeError = error.what();
     }
 
-    mj::Value dllParams = mj::Value::object();
-    dllParams["commands"] = params.at("commands");
-    mj::Value dllResult = SyncDllCommands(dllParams);
-    // 恢复「程序集」视图，避免下一次调用从 DLL 命令表开始。
-    EnsureCodeView();
-
     mj::Value result = mj::Value::object();
     result["targetModuleRow"] = targetModule;
     result["startupRow"] = startupRow;
     result["callbackRow"] = callbackRow;
     result["entryRow"] = entryRow;
-    result["dll"] = std::move(dllResult);
+    // 写 DLL 命令表；SyncDllCommands 会自己切回原来的文档，不会卡住视图。
+    mj::Value dllParams = mj::Value::object();
+    if (params.contains("commands")) dllParams["commands"] = params.at("commands");
+    else dllParams["commands"] = mj::Value::array();
+    result["dll"] = SyncDllCommands(dllParams);
     if (!codeError.empty()) {
         result["codeError"] = AnsiToUtf8(codeError);
         mj::Value steps = mj::Value::array();
@@ -1855,7 +2000,8 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
 mj::Value OpenProject(const mj::Value& params) {
     const std::string path = params.at("path").asString();
     if (BoolOr(params, "saveCurrent", false)) {
-        if (!RunIdeFunction(FN_SAVE_FILE)) throw std::runtime_error("保存当前工程失败");
+        // 没有打开的工程时保存会失败，忽略即可（目的只是避免弹“是否保存”模态框）。
+        RunIdeFunction(FN_SAVE_FILE);
         PumpIdeMessages();
     }
     const std::string ansiPath = Utf8ToAnsi(path);
@@ -1978,7 +2124,10 @@ mj::Value DispatchRequest(const std::string& method, const mj::Value& params) {
     if (method == "project.open") return OpenProject(params);
     if (method == "code.diagnoseCaret") return DiagnoseCaret();
     if (method == "code.ensureCodeView") return EnsureCodeViewResult();
+    if (method == "code.activateDocument") return ActivateWindowByTitle(params);
+    if (method == "code.removeRowRange") return RemoveRowRange(params);
     if (method == "debug.callIdeFunction") return CallIdeFunction(params);
+    if (method == "debug.activateWindowByTitle") return ActivateWindowByTitle(params);
     if (method == "code.undo") {
         if (!RunIdeFunction(FN_UNDO)) throw std::runtime_error("the IDE rejected undo");
         PumpIdeMessages();
@@ -1998,10 +2147,12 @@ mj::Value DispatchRequest(const std::string& method, const mj::Value& params) {
     if (method == "build.compile") {
         ReadAndVerifyRevision(params);
         if (!RunIdeFunction(FN_SAVE_FILE)) throw std::runtime_error("save failed before compilation");
-        const bool staticBuild = BoolOr(params, "staticBuild", false);
         const int waitMs = std::clamp(IntOr(params, "waitMs", 0), 0, 60000);
         const std::wstring before = PrimaryOutputText(CollectDiagnosticCandidates());
-        const bool started = RunIdeFunction(staticBuild ? FN_COMPILE_STATIC : FN_COMPILE) != FALSE;
+        // 用 FN_PRE_COMPILE（预编译）而不是 FN_COMPILE ——后者会弹“输入输出文件名”对话框，无法自动化。
+        // staticBuild 参数保留兼容，但预编译不会产生 exe。
+        BOOL succeeded = FALSE;
+        const bool started = RunIdeFunction(FN_PRE_COMPILE, reinterpret_cast<DWORD>(&succeeded), 0) != FALSE;
         if (waitMs > 0) WaitWithPump(static_cast<DWORD>(waitMs));
         const std::wstring after = PrimaryOutputText(CollectDiagnosticCandidates());
         std::wstring delta;
@@ -2011,7 +2162,8 @@ mj::Value DispatchRequest(const std::string& method, const mj::Value& params) {
             delta = after;
         }
         mj::Value result = mj::Value::object();
-        result["started"] = started;
+        result["started"] = started ? 1 : 0;
+        result["success"] = succeeded ? 1 : 0;
         result["newOutput"] = WideToUtf8(delta);
         result["diagnostics"] = ReadDiagnostics();
         return result;

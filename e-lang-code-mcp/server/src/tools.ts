@@ -325,7 +325,7 @@ export function registerTools(server: McpServer, client: BridgeClient): void {
     {
       title: "写入界面脚手架代码",
       description:
-        "把 EUI 运行时 DLL 声明、启动子程序（EUI_启动界面）与事件回调（EUI_事件回调，含 3 个整数型参数）自动写入当前工程已有的程序集；已存在则跳过（幂等）。需先 ui_attach 创建 .eui.json。",
+        "把 EUI 运行时 DLL 声明、启动子程序（EUI_启动界面，含 EUI_MCP_RunA 调用）、事件回调（EUI_事件回调，含 3 个整数型参数）与入口调用写入当前工程已有的程序集；已存在则跳过（幂等）。需先 ui_attach 创建 .eui.json。",
       inputSchema: {},
       annotations: write,
     },

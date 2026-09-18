@@ -116,10 +116,10 @@ try {
   log(`EUI_MCP_RunA 语句条数: ${runAStatements.length}  ${runAStatements.length === 1 ? "✅" : "❌ 重复了"}`);
   log(`EUI_启动界面 () 入口调用条数: ${callStatements.length}  ${callStatements.length === 1 ? "✅" : "❌ 缺失或重复"}`);
 
-  // DLL 命令表（借一次空 syncDllCommands 切视图）
+  // DLL 命令表（用 activateDocument 按标题切过去）
   log("");
   log("=== 切到 DLL 命令表 ===");
-  await call("code.syncDllCommands", { commands: [] });
+  log(JSON.stringify(await call("code.activateDocument", { titlePrefix: "Dll命令定义表" })));
   const dll = await call("code.readCurrent", { maxRows: 5000, includeEmptyCells: true });
   const dllCells = dll.cells ?? [];
   dumpCells(dllCells, new Set([51, 52, 104, 155, 206, 207]), "DLL 命令表");

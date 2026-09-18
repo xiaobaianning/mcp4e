@@ -171,9 +171,11 @@ Claude Desktop（`claude_desktop_config.json`）：
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| 2 | `eui_runtime.dll`：读 `.eui.json` → 建 Win32 窗口与控件 → 事件回调 | ✅ 已完成（手工端到端验证） |
-| 3 | `ui_sync_code`：一键写入 DLL 声明 + 启动/事件回调子程序 + 参数 + 语句 | ✅ 已完成（已自动验证） |
-| 4 | `ui_run`：部署 DLL 并 `build_run` | ⬜ 未做 |
+| 1 | `.eui.json` 界面文档管理 | ✅ |
+| 2 | `eui_runtime.dll`：读 `.eui.json` → 建 Win32 窗口与控件 → 事件回调 | ✅ |
+| 3 | `ui_sync_code`：一键写入启动/事件回调子程序 + 参数 + 语句（幂等） | ✅ |
+| 4 | `ui_run`：部署 `eui_runtime.dll` + 编译 + 运行 | ✅ |
+| 5 | `project_new`：从 `windows-ui.e` 模板新建工程（不注入已有工程） | 🚧 代码已写，模板待制作 |
 
 ### 阶段 3 用法
 
@@ -182,10 +184,12 @@ Claude Desktop（`claude_desktop_config.json`）：
 - 子程序 `EUI_启动界面`，内含一行
   `EUI_MCP_RunA (取运行目录 () ＋ “\<工程名>.eui.json”, &EUI_事件回调)`
 - 子程序 `EUI_事件回调`，含 3 个整数型参数：`控件编号` / `事件代码` / `事件文本指针`
+- 入口子程序（`_启动子程序` 或 `__启动窗口_创建完毕`）里的一行 `EUI_启动界面 ()`
 
-并把 6 个 `EUI_MCP_*` DLL 命令写进 DLL 命令表。全部**幂等**（已存在则跳过）。
+已存在则改写而不是插第二条（幂等）。
+**DLL 声明默认不写**（`syncDllCommands` 默认 `false`）—— 原因见下一节。
 
-若结构写入失败，结果里会带 `codeError` + `manualSteps`，而 DLL 声明照常写入。
+若结构写入失败，结果里会带 `codeError` + `manualSteps`。
 
 ---
 
@@ -209,6 +213,34 @@ Claude Desktop（`claude_desktop_config.json`）：
 
 结论：本项目**不新建程序集**（复用工程里已有的第一个），
 只用 `FN_INSERT_NEW` 在同类锚点行上插入子程序 / 语句 / 参数。
+
+---
+
+## 活动视图：必须停在「程序集」（重要）
+
+所有代码表操作（`FN_GET_PRG_TEXT` / `FN_SET_AND_COMPILE_PRG_ITEM_TEXT` / `FN_MOVE_*`）都作用于
+**当前活动文档**。如果活动文档是 `DLL命令` / `数据类型` / `常量` 等，代码操作**全部失效**
+（表现为“当前工程里没有任何程序集”）。
+
+实测结果：
+
+- ✅ `FN_VIEW_DATA_TYPE_TAB`(=2) / `FN_VIEW_GLOBAL_VAR_TAB`(=3) / `FN_VIEW_DLLCMD_TAB`(=4) /
+  `FN_VIEW_CONST_TAB`(=6) / `FN_VIEW_PIC_TAB`(=7) / `FN_VIEW_SOUND_TAB`(=8) 都能**可靠切换**。
+- ❌ **官方没有 `FN_VIEW_PRG_TAB`**（程序集=1、窗体设计=5），也没有其它 API 能切回去：
+  `FN_MOVE_NEXT_UNIT` / `FN_MOVE_PREV_UNIT` / `FN_MOVE_SPEC_SUB` / `FN_MOVE_BACK_SUB` /
+  `FN_MOVE_OPEN_SPEC_SUB` / `FN_RELINK` / `FN_GOTO_LAST_MODI_PLACE` /
+  `FN_CLOSE_FILE` + `FN_OPEN_FILE2` —— 实测**全部无效**。
+- 视图是**全局**的（不是每个工程一份），且会跨 IDE 重启保留。
+
+因此本项目采取三条约束：
+
+1. `SyncUiScaffold` 开头调 `EnsureCodeView()`（用 `FN_MOVE_NEXT/PREV_UNIT` 尽力而为），
+   拿不到「程序集」就 **明确报错**，绝不静默失败。
+2. **默认不写 DLL 命令表**（`syncDllCommands` 默认 `false`）—— 因为 `SyncDllCommands`
+   会把视图切到 DLL 命令表且**无法自动切回**。DLL 声明交给 `windows-ui.e` 模板一次性写好。
+3. 确实要写时显式传 `syncDllCommands: true`，并接受“之后需手动点回「程序」标签”。
+
+> 实践结论：打开易语言后让它停在「程序」标签（视图会被记住），之后所有工具都不会再把视图切走。
 
 ---
 
