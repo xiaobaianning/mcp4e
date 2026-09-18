@@ -81,6 +81,44 @@ const euiDllCommands = [
     args: [{ name: "控件编号", type: "整数型" }, { name: "可用", type: "逻辑型" }] },
 ];
 
+// 事件名 → 运行时事件码（与 fne/src/eui_runtime.cpp 的常量一致）
+const eventCodes: Record<string, number> = {
+  created: 1,
+  closing: 2,
+  click: 100,
+  textChanged: 200,
+  checkedChanged: 300,
+  selectionChanged: 400,
+  timer: 500,
+};
+
+// 由 .eui.json 组装脚手架参数（含事件分派：runtimeId + 事件码 + handler）。
+async function scaffoldParams(filePath: string) {
+  const events: { runtimeId: number; eventCode: number; handler: string }[] = [];
+  try {
+    const { document } = await readDocument(filePath);
+    for (const binding of document.form.events) {
+      events.push({ runtimeId: 0, eventCode: eventCodes[binding.event] ?? 0, handler: binding.handler });
+    }
+    for (const control of document.controls) {
+      for (const binding of control.events) {
+        events.push({
+          runtimeId: control.runtimeId,
+          eventCode: eventCodes[binding.event] ?? 0,
+          handler: binding.handler,
+        });
+      }
+    }
+  } catch {
+    // 界面文档不存在时只写脚手架
+  }
+  return {
+    documentName: path.basename(filePath),
+    commands: euiDllCommands,
+    events,
+  };
+}
+
 // 工程模板类型（模板文件为 templates/<type>.e）。
 const projectTemplateTypes = ["windows-window", "windows-console", "windows-ui"] as const;
 
@@ -161,10 +199,7 @@ export function registerTools(server: McpServer, client: BridgeClient): void {
         if (!(await documentExists(uiPath))) {
           await createDocument(uiPath, uiTitle ?? path.basename(resolved, ".e"));
         }
-        const scaffold = await client.call<Record<string, unknown>>("code.syncUiScaffold", {
-          documentName: path.basename(uiPath),
-          commands: euiDllCommands,
-        });
+        const scaffold = await client.call<Record<string, unknown>>("code.syncUiScaffold", await scaffoldParams(uiPath));
         return output({ template: templatePath, projectPath: resolved, opened, uiPath, scaffold });
       } catch (error) {
         await rm(resolved, { force: true }).catch(() => undefined);
@@ -332,12 +367,9 @@ export function registerTools(server: McpServer, client: BridgeClient): void {
     async () => {
       const project = await client.call<{ projectPath: string }>("project.getActive");
       const filePath = sidecarPath(project.projectPath);
-      const documentName = path.basename(filePath);
-      const result = await client.call<Record<string, unknown>>("code.syncUiScaffold", {
-        documentName,
-        commands: euiDllCommands,
-      });
-      return output({ path: filePath, documentName, ...result });
+      const params = await scaffoldParams(filePath);
+      const result = await client.call<Record<string, unknown>>("code.syncUiScaffold", params);
+      return output({ path: filePath, documentName: params.documentName, eventCount: params.events.length, ...result });
     },
   );
 
@@ -365,10 +397,7 @@ export function registerTools(server: McpServer, client: BridgeClient): void {
         projectDir: path.dirname(project.projectPath),
       });
       const scaffold = syncScaffold
-        ? await client.call<Record<string, unknown>>("code.syncUiScaffold", {
-            documentName: path.basename(filePath),
-            commands: euiDllCommands,
-          })
+        ? await client.call<Record<string, unknown>>("code.syncUiScaffold", await scaffoldParams(filePath))
         : null;
       const revision = expectedRevision ?? project.revision;
       const compiled = await client.call("build.compile", { expectedRevision: revision, waitMs });

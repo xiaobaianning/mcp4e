@@ -1965,6 +1965,98 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
         return -1;
     };
 
+    // 把一组语句写进某个子程序（幂等）：
+    //  1) 所有行都已存在 → 跳过；
+    //  2) 否则倒序插在同一个锚点上（FN_INSERT_NEW 插在锚点之前，倒序插完就是相邻且顺序正确）。
+    // 注意：不要“复用空白行”——中间可能夹着读不到的行，导致两行不相邻。
+    auto writeBlockInSubprogram = [&](int subRow, const std::vector<std::string>& lines) -> int {
+        const int endRow = endRowOf(subRow);
+        std::vector<ProgramCell> statements;
+        for (const auto& cell : ReadCurrentCells(kMaxCodeRows)) {
+            if (cell.type == VT_SUB_PRG_ITEM && !cell.title && cell.row > subRow && cell.row < endRow) {
+                statements.push_back(cell);
+            }
+        }
+        std::sort(statements.begin(), statements.end(),
+                  [](const ProgramCell& a, const ProgramCell& b) { return a.row < b.row; });
+        if (!statements.empty()) {
+            int firstFound = -1;
+            bool allFound = true;
+            for (const auto& line : lines) {
+                bool found = false;
+                for (const auto& cell : statements) {
+                    if (cell.text == line) {
+                        found = true;
+                        if (firstFound < 0) firstFound = cell.row;
+                        break;
+                    }
+                }
+                if (!found) { allFound = false; break; }
+            }
+            if (allFound) return firstFound;
+        }
+        // 第一行写进一块空白语句行；后续行用 FN_INSERT_NEW_AT_NEXT 在上一行之后“回车”出来再写。
+        // （如果真/如果 这类语句被写入后，易语言会托管它下面那行“语句体”，不能直写。）
+        int written = -1;
+        int previousRow = -1;
+        for (const auto& line : lines) {
+            if (previousRow >= 0) {
+                try {
+                    previousRow = insertTryAnchors({previousRow}, {FN_INSERT_NEW_AT_NEXT, FN_INSERT_NEW},
+                                                   VT_SUB_PRG_ITEM, line);
+                    continue;
+                } catch (...) {
+                    // 落到下面的扫描写入
+                }
+            }
+            const int scanEnd = std::min(endRow, subRow + 400);
+            for (int row = subRow + 1; row <= scanEnd; ++row) {
+                ProgramCell cell;
+                if (!ReadProgramCell(row, 0, &cell) || cell.title || cell.type != VT_SUB_PRG_ITEM || !cell.text.empty()) {
+                    continue;
+                }
+                setAt(row, 0, line);
+                previousRow = row;
+                if (written < 0) written = row;
+                break;
+            }
+        }
+        if (written >= 0) return written;
+        // 退路：倒序插在同一个锚点上
+        int firstRow = -1;
+        for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
+            firstRow = insertTryAnchors({rowOfTypeIn(VT_SUB_PRG_ITEM, subRow, endRow), lastRowIn(subRow, endRow), subRow},
+                                        {FN_INSERT_NEW, FN_INSERT_NEW_AT_NEXT}, VT_SUB_PRG_ITEM, *it);
+        }
+        return firstRow;
+    };
+
+    // 删掉子程序里名字不在 allowList 里的多余参数行（修历史遗留的脏数据）。
+    auto removeStrayArguments = [&](int subRow, const std::vector<std::string>& allowList) {
+        const int endRow = endRowOf(subRow);
+        std::vector<int> strays;
+        for (const auto& cell : ReadCurrentCells(kMaxCodeRows)) {
+            if (cell.type != VT_SUB_ARG_NAME || cell.title) continue;
+            if (cell.row <= subRow || cell.row >= endRow) continue;
+            bool allowed = false;
+            for (const auto& name : allowList) {
+                if (cell.text == name) { allowed = true; break; }
+            }
+            if (!allowed) strays.push_back(cell.row);
+        }
+        std::sort(strays.begin(), strays.end(), [](int a, int b) { return a > b; });
+        for (int row : strays) {
+            try {
+                RunIdeFunction(FN_BLK_ADD_DEF, static_cast<DWORD>(row), static_cast<DWORD>(row));
+                PumpIdeMessages();
+                RunIdeFunction(FN_REMOVE);
+                PumpIdeMessages();
+            } catch (...) {
+                // 清理失败不影响主流程
+            }
+        }
+    };
+
     const std::string startupName = AnsiToUtf8("EUI_启动界面");
     const std::string callbackName = AnsiToUtf8("EUI_事件回调");
     const std::string statement = AnsiToUtf8(
@@ -1974,6 +2066,8 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
     int startupRow = -1;
     int callbackRow = -1;
     int entryRow = -1;
+    int dispatchRow = -1;
+    int dispatchHandlers = 0;
     std::string codeError;
     try {
         targetModule = resolveModule();
@@ -1986,6 +2080,35 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
         ensureArgument(callbackName, AnsiToUtf8("事件文本指针"), AnsiToUtf8("整数型"));
         ensureArgument(callbackName, AnsiToUtf8("事件代码"), AnsiToUtf8("整数型"));
         ensureArgument(callbackName, AnsiToUtf8("控件编号"), AnsiToUtf8("整数型"));
+        // 清掉历史遗留的多余参数（否则回调的参数个数会对不上运行时的 3 个）。
+        {
+            const int argRow = findRow(VT_SUB_NAME, callbackName);
+            if (argRow >= 0) {
+                removeStrayArguments(argRow, { AnsiToUtf8("控件编号"), AnsiToUtf8("事件代码"), AnsiToUtf8("事件文本指针") });
+            }
+        }
+
+        // 事件分发骨架：按 .eui.json 的绑定，在 EUI_事件回调 里生成分派，并建好处理子程序。
+        if (params.contains("events") && callbackRow >= 0) {
+            std::vector<std::string> dispatch;
+            for (const auto& item : params.at("events").items()) {
+                const std::string handler = item.contains("handler") ? item.at("handler").asString() : std::string();
+                const int eventCode = IntOr(item, "eventCode", 0);
+                if (handler.empty() || eventCode <= 0) continue;
+                const int runtimeId = IntOr(item, "runtimeId", 0);
+                ensureSubprogram(targetModule, handler);
+                dispatch.push_back(AnsiToUtf8("如果真 (控件编号 ＝ ") + std::to_string(runtimeId) +
+                                   AnsiToUtf8(" 且 事件代码 ＝ ") + std::to_string(eventCode) + AnsiToUtf8(")"));
+                // 注意：易语言的「如果真」是单语句形式（只管下一行），没有「如果真结束」。
+                dispatch.push_back(handler + AnsiToUtf8(" ()"));
+                ++dispatchHandlers;
+            }
+            if (!dispatch.empty()) {
+                // 创建 handler 子程序会移动行号，写入前必须按名字重新定位 EUI_事件回调。
+                const int freshCallbackRow = findRow(VT_SUB_NAME, callbackName);
+                dispatchRow = writeBlockInSubprogram(freshCallbackRow >= 0 ? freshCallbackRow : callbackRow, dispatch);
+            }
+        }
         // 结构插入会移动行号，最后重新读一次真实位置。
         const int finalStartup = findRow(VT_SUB_NAME, startupName);
         const int finalCallback = findRow(VT_SUB_NAME, callbackName);
@@ -2000,6 +2123,8 @@ mj::Value SyncUiScaffold(const mj::Value& params) {
     result["startupRow"] = startupRow;
     result["callbackRow"] = callbackRow;
     result["entryRow"] = entryRow;
+    result["dispatchRow"] = dispatchRow;
+    result["dispatchHandlers"] = dispatchHandlers;
     // 写 DLL 命令表；SyncDllCommands 会自己切回原来的文档，不会卡住视图。
     mj::Value dllParams = mj::Value::object();
     if (params.contains("commands")) dllParams["commands"] = params.at("commands");
