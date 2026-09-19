@@ -96,3 +96,28 @@ if ($codex) {
     Write-Output "未找到 codex.cmd，请手动把以下命令登记到你的 MCP 客户端："
     Write-Output "  node `"$bundle`""
 }
+
+# 注册到 Claude Code（如果装了）；用完整 node 路径，避免它读不到 PATH。
+$node = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $node) { $node = 'node' }
+$claude = Get-Command claude -ErrorAction SilentlyContinue
+if ($claude) {
+    & $claude.Source mcp remove e-lang -s user 2>$null | Out-Null
+    & $claude.Source mcp add e-lang -s user -- $node $bundle 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Output "已注册 Claude Code MCP 服务: e-lang -> $node $bundle"
+    } else {
+        Write-Output "Claude Code 自动注册失败，请手动执行："
+        Write-Output "  claude mcp add e-lang -s user -- `"$node`" `"$bundle`""
+    }
+} else {
+    Write-Output "未找到 claude 命令（Claude Code 未安装或不在 PATH）"
+}
+
+# Claude Desktop（如果装了）需要改配置并重启 App。
+$desktopConfig = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+if (Test-Path -LiteralPath (Split-Path -Parent $desktopConfig)) {
+    Write-Output ""
+    Write-Output "检测到 Claude Desktop。请把下面这段合并进 $desktopConfig 的 mcpServers，然后重启 Claude："
+    Write-Output "  `"e-lang`": { `"command`": `"$($node -replace '\\','\\\\')`", `"args`": [`"$($bundle -replace '\\','\\\\')`"] }"
+}
