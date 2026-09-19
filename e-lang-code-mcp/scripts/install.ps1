@@ -14,7 +14,7 @@ $target = Join-Path $libDirectory 'elang_mcp.fne'
 $legacyTarget = Join-Path $libDirectory 'codex_bridge.fne'
 
 # 安装前必须关闭易语言，否则 .fne 被占用、无法覆盖或删除。
-$running = Get-Process -Name 'e', 'e5' -ErrorAction SilentlyContinue
+$running = Get-Process -Name 'e', 'e5', 'e8' -ErrorAction SilentlyContinue
 if ($running) {
     throw "检测到易语言正在运行。请先保存并关闭易语言，再运行安装脚本。"
 }
@@ -54,6 +54,16 @@ if (Test-Path -LiteralPath $runtimeSource) {
 } else {
     Write-Warning "未找到 $runtimeSource（阶段 2 的运行时 DLL 尚未构建）"
 }
+
+# 工程模板（project_new 用；模板就在仓库里，不需要复制）
+$template = Join-Path $repo 'templates\windows-ui.e'
+if (Test-Path -LiteralPath $template) {
+    Write-Output "已就绪工程模板: $template"
+} else {
+    Write-Warning "缺少工程模板 $template —— project_new 将无法新建工程。制作方法见 templates\README.md"
+}
+
+# .ec 易模块搜索是“按需解析”，无需额外安装，直接可用。
 
 Write-Output "请打开易语言 -> 工具 -> 支持库配置 -> 勾选「易语言 MCP 桥接支持库」-> 重启易语言。"
 

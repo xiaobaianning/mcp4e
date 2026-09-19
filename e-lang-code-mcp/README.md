@@ -69,7 +69,22 @@ e-lang-code-mcp/
 
 ## 构建与安装
 
-### 1. 编译并安装支持库
+### 0. 一键安装（推荐）
+
+双击 **`e-lang-code-mcp\一键构建安装.bat`**，它会依次完成：
+
+1. 编译支持库（`fne\dist\elang_mcp.fne` + `eui_runtime.dll`）
+2. `npm install` + 打包 MCP 服务（`server\dist\server.mjs`）
+3. 安装到易语言 `lib\`，并注册 MCP 服务（`e-lang`）
+
+> ⚠ 运行前请**保存并关闭易语言**（`lib\elang_mcp.fne` 被占用时无法覆盖）。
+
+安装完还需要**一次性手工操作**：
+
+- 打开易语言 → **工具 → 支持库配置** → 勾选 **「易语言 MCP 桥接支持库」** → 重启易语言
+- （如果要让 AI 新建界面工程）确认 `templates\windows-ui.e` 存在 —— 缺了就按 [`templates/README.md`](templates/README.md) 两分钟做一个
+
+### 1. 手动分步安装
 
 ```powershell
 # 在仓库根目录
@@ -125,11 +140,27 @@ Claude Desktop（`claude_desktop_config.json`）：
 | `project_save` | 官方保存 |
 | `build_compile` / `build_run` / `build_stop` | 编译 / 运行 / 停止 |
 | `build_get_diagnostics` | 只读采集编译输出（含 `output` 全文与 `newOutput` 本次增量） |
+| **`lib_find_command`** | **★ 写代码前先调这个**：一次同时搜 `.fne` 支持库 + `.ec` 易模块，返回可直接抄写的命令签名 |
 | `lib_search_commands` | 按关键词搜 **`.fne` 支持库**命令（命令名 + 参数 + 类型） |
 | `lib_search_ecom_commands` | 按关键词搜 **`.ec` 易模块**命令，返回现成签名 + 参数 + 类型 |
 | `lib_list_libraries` / `lib_list_ecoms` | 列出已加载的支持库 / 易模块 |
 | `lib_list_trees` / `debug_dump_windows` / `lib_inspect_ecom` | 调试：命令树、窗口树、`.ec` 十六进制 |
 | `code_undo` | 撤销上一次代码改动 |
+
+### 推荐工作流（AI 视角）
+
+```
+0. 写任何功能代码之前 —— 先 lib_find_command 搜现成命令        ← 第一原则
+1. 新建界面工程      project_new { type: "windows-ui", path: "E:\\work\\app.e" }
+2. 设计界面          ui_apply_batch     （控件 + 事件绑定 handler）
+3. 自动接线          ui_sync_code       （DLL 声明 / 脚手架 / 事件分派 / handler 空子程序）
+4. 跑起来            ui_run             （部署 DLL → 编译 → 运行）
+5. 只填业务逻辑      code_apply_current / code_batch（往 handler 里写）
+```
+
+> 第 0 步是**硬规则**，已写进 MCP 的 `initialize.instructions`：
+> 优先调用支持库 / 已导入易模块里的现成命令，确实搜不到才自己写（兜底）。
+> 新加的工具 `lib_find_command` 一次同时搜 `.fne` + `.ec`，把“守规则”的成本降到一次调用。
 
 ### 典型用法
 
@@ -164,6 +195,9 @@ Claude Desktop（`claude_desktop_config.json`）：
 | `ui_apply_batch` | 批量 增/改/删 + 绑事件 |
 | `ui_remove_control` | 删控件 |
 | `ui_bind_event` | 把控件事件绑到处理子程序 |
+| `ui_sync_code` | 一键写脚手架：DLL 声明 + 启动/回调子程序 + 入口调用 + 按 `.eui.json` **自动生成事件分派** |
+| `ui_run` | 部署 `eui_runtime.dll`（IDE 目录 + 工程目录）→ 编译 → 运行 |
+| `project_new` | 从 `windows-ui.e` 模板新建工程（**不往已有老工程注入脚手架**） |
 
 用法：`ui_attach` → `ui_get_document` 拿 `revision` → `ui_apply_batch`（带 `expectedRevision`）。
 
